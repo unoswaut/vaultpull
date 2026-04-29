@@ -1,83 +1,73 @@
 package config
 
 import (
-	"fmt"
+	"errors"
 	"os"
 
-	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
-// Config holds all configuration for vaultpull.
-type Config struct {
-	VaultAddr  string `mapstructure:"vault_addr"`
-	VaultToken string `mapstructure:"vault_token"`
-	VaultPath  string `mapstructure:"vault_path"`
-	OutputFile string `mapstructure:"output_file"`
-	Rotate     bool   `mapstructure:"rotate"`
+// Mapping pairs a Vault secret path with a local env file destination.
+type Mapping struct {
+	VaultPath string `yaml:"vault_path"`
+	EnvFile   string `yaml:"env_file"`
 }
 
-// Load reads configuration from a file and environment variables.
-// Environment variables take precedence over the config file.
-func Load(cfgFile string) (*Config, error) {
-	v := viper.New()
+// Config holds all vaultpull runtime configuration.
+type Config struct {
+	VaultAddr string    `yaml:"vault_addr"`
+	VaultToken string   `yaml:"vault_token"`
+	Rotate    bool      `yaml:"rotate"`
+	Mappings  []Mapping `yaml:"mappings"`
+}
 
-	v.SetDefault("vault_addr", "http://127.0.0.1:8200")
-	v.SetDefault("output_file", ".env")
-	v.SetDefault("rotate", false)
-
-	v.SetEnvPrefix("VAULTPULL")
-	v.AutomaticEnv()
-
-	// Allow VAULT_ADDR and VAULT_TOKEN from standard Vault env vars.
-	_ = v.BindEnv("vault_addr", "VAULT_ADDR")
-	_ = v.BindEnv("vault_token", "VAULT_TOKEN")
-
-	if cfgFile != "" {
-		v.SetConfigFile(cfgFile)
-	} else {
-		v.SetConfigName(".vaultpull")
-		v.SetConfigType("yaml")
-		v.AddConfigPath(".")
-		v.AddConfigPath(os.Getenv("HOME"))
+// Load reads configuration from the given YAML file path and applies
+// environment variable overrides for sensitive fields.
+func Load(path string) (*Config, error) {
+	cfg := &Config{
+		VaultAddr:  "http://127.0.0.1:8200",
+		VaultToken: "",
+		Rotate:     false,
 	}
 
-	if err := v.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, fmt.Errorf("reading config file: %w", err)
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, err
 		}
 	}
 
-	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("unmarshalling config: %w", err)
+	if v := os.Getenv("VAULT_ADDR"); v != "" {
+		cfg.VaultAddr = v
+	}
+	if v := os.Getenv("VAULT_TOKEN"); v != "" {
+		cfg.VaultToken = v
 	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-
-	return &cfg, nil
+	return cfg, nil
 }
 
 func (c *Config) validate() error {
 	if c.VaultAddr == "" {
-		return fmt.Errorf("vault_addr must not be empty")
+		return errors.New("vault_addr is required")
 	}
 	if c.VaultToken == "" {
-		return fmt.Errorf("vault_token must not be empty (set VAULT_TOKEN or vault_token in config)")
+		return errors.New("vault_token is required")
 	}
-	if c.VaultPath == "" {
-		return fmt.Errorf("vault_path must not be empty")
+	for i, m := range c.Mappings {
+		if m.VaultPath == "" {
+			return errors.New("mapping missing vault_path")
+		}
+		if m.EnvFile == "" {
+			return errors.New("mapping missing env_file")
+		}
+		_ = i
 	}
 	return nil
-}
-
-// Redacted returns a copy of Config with sensitive fields masked,
-// suitable for logging or display.
-func (c *Config) Redacted() Config {
-	redacted := *c
-	if redacted.VaultToken != "" {
-		redacted.VaultToken = "***"
-	}
-	return redacted
 }
