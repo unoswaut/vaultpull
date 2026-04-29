@@ -71,3 +71,13 @@ func (c *Config) validate() error {
 	}
 	return nil
 }
+
+// Redacted returns a copy of Config with sensitive fields masked,
+// suitable for logging or display.
+func (c *Config) Redacted() Config {
+	redacted := *c
+	if redacted.VaultToken != "" {
+		redacted.VaultToken = "***"
+	}
+	return redacted
+}
