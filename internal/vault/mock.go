@@ -37,3 +37,18 @@ func (m *MockClient) ReadSecrets(_ context.Context, path string) (map[string]str
 	}
 	return copy, nil
 }
+
+// CallCount returns the number of times ReadSecrets was called for the given
+// path. If path is empty, it returns the total number of calls across all paths.
+func (m *MockClient) CallCount(path string) int {
+	if path == "" {
+		return len(m.Calls)
+	}
+	count := 0
+	for _, p := range m.Calls {
+		if p == path {
+			count++
+		}
+	}
+	return count
+}
