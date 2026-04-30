@@ -2,75 +2,75 @@ package sync
 
 import (
 	"fmt"
-	"log"
 
+	"github.com/example/vaultpull/internal/audit"
 	"github.com/example/vaultpull/internal/config"
 	"github.com/example/vaultpull/internal/env"
+	"github.com/example/vaultpull/internal/rotate"
 	"github.com/example/vaultpull/internal/vault"
 )
 
-// VaultClient is the interface used by Syncer to read secrets.
-type VaultClient interface {
-	ReadSecrets(path string) (map[string]string, error)
-}
-
-// Syncer orchestrates reading secrets from Vault and writing them to .env files.
+// Syncer orchestrates reading secrets from Vault and writing .env files.
 type Syncer struct {
-	client VaultClient
-	cfg    *config.Config
+	client  vault.Client
+	cfg     *config.Config
+	rotator *rotate.Rotator
+	auditor *audit.Logger
+	errors  []error
 }
 
-// New creates a new Syncer with the provided client and config.
-func New(client VaultClient, cfg *config.Config) *Syncer {
-	return &Syncer{client: client, cfg: cfg}
+// New creates a Syncer from the given config and vault client.
+func New(cfg *config.Config, client vault.Client, auditor *audit.Logger) *Syncer {
+	r := rotate.New(cfg.MaxBackups)
+	return &Syncer{
+		client:  client,
+		cfg:     cfg,
+		rotator: r,
+		auditor: auditor,
+	}
 }
 
-// Result holds the outcome of syncing a single mapping.
-type Result struct {
-	Path    string
-	OutFile string
-	Err     error
-}
-
-// Run iterates over all configured mappings, fetches secrets, and writes env files.
-func (s *Syncer) Run() []Result {
-	results := make([]Result, 0, len(s.cfg.Mappings))
-
+// Run executes the sync for every mapping in the config.
+func (s *Syncer) Run() {
 	for _, m := range s.cfg.Mappings {
-		r := Result{Path: m.VaultPath, OutFile: m.EnvFile}
-
 		secrets, err := s.client.ReadSecrets(m.VaultPath)
 		if err != nil {
-			r.Err = fmt.Errorf("reading %q: %w", m.VaultPath, err)
-			results = append(results, r)
-			log.Printf("[error] %v", r.Err)
+			s.errors = append(s.errors, fmt.Errorf("vault read %s: %w", m.VaultPath, err))
+			if s.auditor != nil {
+				_ = s.auditor.Log("error", m.VaultPath, m.EnvFile, err)
+			}
 			continue
 		}
 
-		w := env.NewWriter(m.EnvFile, s.cfg.Rotate)
+		if err := s.rotator.Rotate(m.EnvFile); err != nil {
+			s.errors = append(s.errors, fmt.Errorf("rotate %s: %w", m.EnvFile, err))
+			if s.auditor != nil {
+				_ = s.auditor.Log("error", m.VaultPath, m.EnvFile, err)
+			}
+			continue
+		}
+
+		w := env.NewWriter(m.EnvFile)
 		if err := w.Write(secrets); err != nil {
-			r.Err = fmt.Errorf("writing %q: %w", m.EnvFile, err)
-			results = append(results, r)
-			log.Printf("[error] %v", r.Err)
+			s.errors = append(s.errors, fmt.Errorf("write %s: %w", m.EnvFile, err))
+			if s.auditor != nil {
+				_ = s.auditor.Log("error", m.VaultPath, m.EnvFile, err)
+			}
 			continue
 		}
 
-		log.Printf("[ok] synced %q -> %q (%d keys)", m.VaultPath, m.EnvFile, len(secrets))
-		results = append(results, r)
-	}
-
-	return results
-}
-
-// HasErrors returns true if any result contains an error.
-func HasErrors(results []Result) bool {
-	for _, r := range results {
-		if r.Err != nil {
-			return true
+		if s.auditor != nil {
+			_ = s.auditor.Log("sync", m.VaultPath, m.EnvFile, nil)
 		}
 	}
-	return false
 }
 
-// ensure vault.Client satisfies VaultClient at compile time.
-var _ VaultClient = (*vault.Client)(nil)
+// HasErrors reports whether any errors occurred during Run.
+func (s *Syncer) HasErrors() bool {
+	return len(s.errors) > 0
+}
+
+// Errors returns all errors collected during Run.
+func (s *Syncer) Errors() []error {
+	return s.errors
+}
